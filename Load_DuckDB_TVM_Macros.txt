@@ -1,0 +1,166 @@
+--Load Macros
+-------------
+.read C:/Users/storl/Desktop/DuckDB_TVM_Macros/tvm_macros.sql
+.read C:/Users/storl/Desktop/DuckDB_TVM_Macros/xnpv_xirr_macros.sql
+.read C:/Users/storl/Desktop/DuckDB_TVM_Macros/irr_macro.sql
+
+call start_ui();
+
+--------------------------------------------------
+-- Verify that the macros exists in database
+--------------------------------------------------
+
+--By schema — all macros in the main schema (excludes built-ins):
+-----------------------------------------------------------------
+SELECT function_name, function_type, schema_name
+FROM duckdb_functions()
+WHERE function_type IN ('macro', 'table_macro')
+  AND schema_name = 'main'
+ORDER BY function_type, function_name;
+
+
+--Count check — quickly confirm all 12 are loaded:
+-----------------------------------------------
+SELECT COUNT(*) AS loaded_macros
+FROM duckdb_functions()
+WHERE function_name IN (
+    'fv', 'pv', 'pmt', 'nper', 'ipmt', 'ppmt',
+    'npv', 'mirr', 'irr', 'xnpv', 'xirr',
+    'amortization_schedule'
+);
+
+
+--By name — check all your specific macros exist:
+------------------------------------------------
+SELECT function_name, function_type
+FROM duckdb_functions()
+WHERE function_name IN (
+    'fv', 'pv', 'pmt', 'nper', 'ipmt', 'ppmt',
+    'npv', 'mirr', 'irr', 'xnpv', 'xirr',
+    'amortization_schedule'
+)
+ORDER BY function_name;
+
+--By name — partial match with LIKE (useful if you only remember part of a name):
+--------------------------------------------------------------------------------
+SELECT function_name, function_type
+FROM duckdb_functions()
+WHERE function_type IN ('macro', 'table_macro')
+  AND function_name ILIKE '%irr%'   -- matches irr, xirr, mirr
+ORDER BY function_name;
+
+
+SELECT function_name, function_type,  macro_definition, description
+FROM duckdb_functions()
+WHERE function_type IN ('macro', 'table_macro')
+  AND function_name ILIKE '%amort%'   
+ORDER BY function_name;
+
+
+-- ============================================================
+-- TVM-TEST QUERIES
+-- ============================================================
+-- Paste any of these after running .read tvm_macros.sql:
+
+SELECT fv(0.05/12, 10*12, -100, -100)                              AS fv;   -- 15692.929
+SELECT pv(0.05/12, 10*12, -100, 15692.93)                          AS pv;  --  -100.001
+SELECT pmt(0.075/12, 12*15, 200000)                                AS pmt;  -- -1854.025
+SELECT nper(0.07/12, -150, 8000)                                   AS nper; -- 64.073
+SELECT ipmt(0.0824/12, 1, 12, 2500)                                AS ipmt; -- -17.167
+SELECT ppmt(0.0824/12, 1, 12, 2500)                                AS ppmt; -- -200.582
+SELECT npv(0.08, [-40000.0, 5000.0, 8000.0, 12000.0, 30000.0])     AS npv;   -- 3065.223
+
+SELECT * FROM mirr([-100.0, 50.0, -60.0, 70.0], 0.10, 0.12);                -- -0.039
+SELECT * FROM amortization_schedule(0.0325/12, 180, 350000) LIMIT 16;
+
+
+
+-- ============================================================
+-- IRR-TEST QUERIES
+-- See line 1102 in the numpy-financial GitHub repository
+-- https://github.com/numpy/numpy-financial/blob/main/numpy_financial/_financial.py
+-- ============================================================
+SELECT * FROM irr([-100.0, 39.0, 59.0, 55.0, 20.0]);
+--> 0.2809484211  (28.09%)
+
+SELECT * FROM irr([-100.0, 0.0, 0.0, 74.0]);
+--> -0.0955  (-9.55%)
+
+SELECT * FROM irr([-100.0, 100.0, 0.0, 7.0]);
+--> 0.06206  (6.21%)
+
+SELECT * FROM irr([-5.0, 10.5, 1.0, -8.0, 1.0], guess := 0.05);
+--> 0.0886  (8.86%)
+
+--Formatted as percent:
+.timer on
+SELECT
+    format('{:.2f}%', irr * 100) AS irr_pct,
+    converged
+FROM irr([-100.0, 39.0, 59.0, 55.0, 20.0]);
+
+
+-- Annualize a monthly IRR:
+-- $10,000 loan, $250/month for 48 months (~1% monthly)
+SELECT
+    irr                                         AS monthly_irr,
+    POW(1.0 + irr, 12) - 1                     AS annual_irr,
+    format('{:.4f}%', irr * 100)               AS monthly_irr_fmt,
+    format('{:.4f}%', (POW(1.0+irr,12)-1)*100) AS annual_irr_fmt
+FROM irr(
+    [-10000.0, 250.0, 250.0, 250.0, 250.0, 250.0, 250.0,
+       250.0,  250.0, 250.0, 250.0, 250.0, 250.0, 250.0,
+       250.0,  250.0, 250.0, 250.0, 250.0, 250.0, 250.0,
+       250.0,  250.0, 250.0, 250.0, 250.0, 250.0, 250.0,
+       250.0,  250.0, 250.0, 250.0, 250.0, 250.0, 250.0,
+       250.0,  250.0, 250.0, 250.0, 250.0, 250.0, 250.0,
+       250.0,  250.0, 250.0, 250.0, 250.0, 250.0, 250.0]
+);
+-- monthly ~1.0%,  annual ~12.7%
+-- ============================================================
+-- USAGE EXAMPLES
+-- ============================================================
+
+-- XNPV: $1000 investment, five $250 returns every ~6 months at 10%
+ SELECT xnpv(
+     0.10,
+     [-1000.0, 250.0, 250.0, 250.0, 250.0, 250.0],
+     ['2025-01-01','2025-07-01','2026-01-01',
+      '2026-07-01','2027-01-01','2027-07-01']::DATE[]
+ ) AS xnpv;
+
+ -- XIRR: find the rate that makes the above XNPV = 0
+ SELECT * FROM xirr(
+     [-1000.0, 250.0, 250.0, 250.0, 250.0, 250.0],
+     ['2025-01-01','2025-07-01','2026-01-01',
+      '2026-07-01','2027-01-01','2027-07-01']::DATE[]
+ );
+
+ -- Verify: XNPV at the XIRR rate should equal ~0
+ SELECT xnpv(
+     (SELECT xirr FROM xirr(
+         [-1000.0, 250.0, 250.0, 250.0, 250.0, 250.0],
+         ['2025-01-01','2025-07-01','2026-01-01',
+          '2026-07-01','2027-01-01','2027-07-01']::DATE[]
+     )),
+     [-1000.0, 250.0, 250.0, 250.0, 250.0, 250.0],
+     ['2025-01-01','2025-07-01','2026-01-01',
+      '2026-07-01','2027-01-01','2027-07-01']::DATE[]
+ ) AS xnpv_at_xirr;    should be ~0
+
+ -- Classic Excel XIRR example from documentation:
+ SELECT * FROM xirr(
+     [-10000.0, 2750.0, 4250.0, 3250.0, 2750.0],
+     ['2008-01-01','2008-03-01','2008-10-30',
+      '2009-02-15','2009-04-01']::DATE[]
+ );
+  -- Excel gives 0.3734 (37.34%)
+
+ -- Classic Excel XNPV example from documentation:
+ SELECT * FROM xnpv(0.09,
+     [-10000.0, 2750.0, 4250.0, 3250.0, 2750.0],
+     ['2008-01-01','2008-03-01','2008-10-30',
+      '2009-02-15','2009-04-01']::DATE[]
+ );
+  -- Excel gives $2,086.65
+
